@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+##
+
+
+## BASE BRAIN - Get where you're from and who you are.
+MYPID=$$
+ORIGINAL_DIR="$(pwd)" # This is not a hot air balloon ride..
+fa="$0" # First Assumption
+ta= # Temporary Assumption
+wa= # Weighed Assumption
+while true; do
+    [ "${fa:0:1}" = "/" ] && wa=$0 && break
+    [ "${fa:0:2}" = "./" ] && ta="${ORIGINAL_DIR}/${fa:2}" && [ -e "$ta" ] && wa="$ta" && break
+    ta="${ORIGINAL_DIR}/${fa}" && [ -e "$ta" ] && wa="$ta" && break
+done
+SW="$wa"
+SWDIR="$(dirname "$wa")"
+SWBIN="$(basename "$wa")"
+unset ta fa wa
+( [ ! -e "$SWDIR/$SWBIN" ] || [ -z "$SW" ] ) && echo "I could not find my way around :( possible bug in the TOP script" && exit 1
+
+### Libraries
+
+. /etc/profile.d/20_rosterlib.sh
+. /usr/lib/bash-tui/bashparms.sh
+
+##
+# This will take an http/dev snapshot and scp it to a place
+##
+c=0
+e=0
+
+## If you need help, getHelp
+
+isParm help && _BP_getHelp && exit 113
+
+DIR=$(getParm local_dir) || DIR=/data/camera/backyard  ##BP: Local directory where to upload
+
+NAME=
+
+# How often to take pics
+every=$(getParm interval) || every=10  ##BP: something
+
+## VARS
+key=~/identity/pong_unlocked_rsa_identity
+scp=/usr/bin/scp
+ssh=/usr/bin/ssh
+rsync=/usr/bin/rsync
+
+## Say: Automatic Logging
+_L_file_=$(date +%Y%m%d)_snapshot.log # Log file
+_L_dir_=/var/log/snapshots # Log Dir
+_L_l_=20  # Log Level debug:30 warning:20 info:10 error
+
+upload_server=$(getParm upload_server) || upload_server=pong  ##BP: Upload server host/ip
+upload_user=$(getParm upload_user) || upload_user=root  ##BP: Upload user
+
+# used to be /home/webserver/watch/backyard/history 
+upload_dir=$(getParm upload_dir) || upload_dir=         ##BP: Remote upload directory
+
+# used to be /home/webserver/watch/backyard/backyard.jpg 
+upload_static=$(getParm upload_static) || upload_static=  ##BP: Remote upload of snapshot overwriting itself as $label
+
+# used to be "http://10.6.122.1:85/images/snapshot.jpg" 
+input_uri=$(getParm input_uri) || input_uri=  ##BP:  Where to grab the snapshot from
+[ -z "${input_uri}" ] && input_dev=$(getParm input_dev)  ##BP:   something
+
+# the resolution of the image...
+resolution=$(getParm resolution)  ##BP: Set a resolution for the picture
+
+snap_label=$(getParm label) || snap_label=backyard  ##BP: Snapshot's label
+snap_ext=$(getParm ext) || snap_ext=jpg  ##BP: Snapshot's extension
+
+max_errors=$(getParm max_errors) || max_errors=5  ##BP: whatever
+
+loglevel=$(getParm loglevel) || loglevel=quiet  ##BP: idontknow
+## methods
+
+# Reduce the file size for the web
+reduce_img_web()
+{
+  DQ=70 # Default quality
+  [ -z $1 ] && return 1 || IN=$1
+  QT=$(getParm staticQt) || QT=${DQ}  ##BP: Quality of the static image
+  [ "${QT}" -eq 1 ] && QT=${DQ}
+  OUT=$(mktemp /tmp/${snap_label}XXXX.${snap_ext})
+  convert "${IN}" -strip -interlace Plane -gaussian-blur 0.05 -quality ${QT} -resize 1920x1080\> ${OUT} || return 1
+  echo "${OUT}"
+return 0
+}
+
+remote_upload_snap()
+{
+  ## Is dir there? if not make... or I could've just made it..
+  if [ ! -z "${upload_dir}" ]; then 
+    ${ssh} -i ${key} ${upload_user}@${upload_server} "[ ! -e \"${upload_dir}/${SUBDIR}\" ] && /bin/mkdir -p \"${upload_dir}/${SUBDIR}\""
+    ${scp} -i ${key} "$OUTPUT" ${upload_user}@${upload_server}:${upload_dir}/${SUBDIR}/${DATE_now}-${snap_label}.${snap_ext}
+    (( $? )) && say "Uploading to $SUBDIR/${DATE_now}-${snap_label}.jpg failed!!" error && return 1
+  fi
+  if [ ! -z "${upload_static}" ]; then
+    staticSource=
+    if isParm staticQt; then
+      staticSource=$(reduce_img_web $OUTPUT)
+    else
+      staticSource=$OUTPUT
+    fi
+    ${scp} -i ${key} "${staticSource}" ${upload_user}@${upload_server}:${upload_static}
+    (( $? )) && say "Uploading to ${upload_static} failed!!" error && return 1
+    isParm staticQt && rm -rf "${staticSource}"
+  fi
+return 0
+}
+
+# Returns whether or not the jpg shot is valid
+valid_jpg()
+{
+  tail -c -2 "$*" | hexdump | grep '00 d9ff' &>/dev/null 2>&1 || return 1
+  return 0
+}
+
+## If you want to delete the image use --deleteImg
+cleanup()
+{
+  isNotParm store_locally && isNotParm delete_image &&  rm -rf "${OUTPUT}" && say "deleted $OUTPUT"
+  isParm oneshot && exit 69
+}
+##
+
+## To start and stop at the same minute...
+MIN_start=$(date +%M | sed 's|^0||g')
+
+c=0
+MIN_now=$(date +%M | sed 's|^0||g')
+## Wait if this process is already running...
+while [ $MIN_start -eq $MIN_now ]; do ((p++))
+  ## The awk script excludes myself from the mix
+  [ $(ps -ef | grep "bash ${SW}" | grep -v 'grep' | awk -v MYPID="${MYPID}" '{if ($2 == MYPID) { } else if ($3 == MYPID) { } else { print $0 } }' | grep -c "${SW}") -gt 0 ] && say "Found another one of me running, sleeping" warning && sleep 5 || break
+  [ $p -gt ${max_errors} ] && say "Too many errors" error && exit 6
+  MIN_now=$(date +%M | sed 's|^0||g')
+done
+
+c=0
+MIN_now=$(date +%M | sed 's|^0||g')
+while [ $MIN_start -eq $MIN_now ]; do ((c++))
+  [ "$e" -gt ${max_errors} ] && say "Too many errors" error && exit 5
+  DATE_now=$(date +"%Y%m%d-%H%M%S")
+  SUBDIR=$(date +%Y%m%d)
+  isParm store_locally && OUTPUT=${DIR}/${SUBDIR}/${DATE_now}-${snap_label}.${snap_ext} || OUTPUT=$(mktemp /tmp/${DATE_now}-${snap_label}XXXX.${snap_ext})
+
+  ## This is to remove time at the end depending on how long we've been here taking this picture
+  Tb=$(date +%s)
+
+  isParm store_locally && [ ! -d ${DIR}/${SUBDIR} ] && /bin/mkdir -p ${DIR}/${SUBDIR}
+  if [ ! -z "${input_dev}" ]; then
+    say "about to download: \"$OUTPUT\" via \"$input_dev\"" red
+
+    ## TODO: remove later but for now I will set a resolution because it's necessary here. is it though?
+    [ -z ${resolution} ] && resolution=3840x2160
+    [ -z ${loglevel} ] && loglevel=quiet
+
+    ffmpeg \
+      -y \
+      -hide_banner \
+      -loglevel $loglevel \
+      -f video4linux2 \
+      -pix_fmt yuyv422 \
+      -i ${input_dev} \
+      -s ${resolution} \
+      -vframes 1 \
+      -sn \
+      -an \
+      -stimeout 5000 \
+      "${OUTPUT}"
+
+  elif [ ! -z "${input_uri}" ]; then
+    say "about to call: wget -O \"$OUTPUT\" \"$input_uri\"" red
+    wget -O "$OUTPUT" "$input_uri"
+  fi
+
+  ## Possible errors
+  [ ! -e "${OUTPUT}" ] && say "[$e] No image created :(" error && ((++e)) && continue
+  [ -e "${OUTPUT}" ] && ( ! valid_jpg "${OUTPUT}" ) && say "an image was created, but invalid :(" error && cleanup && ((++e)) && continue
+
+  ## Ok then proceed
+  remote_upload_snap; RED=$?
+  cleanup
+  (( $RED )) && MIN_now=$(date +%M | sed 's|^0||g') && ((++e)) && continue
+
+  Td=$(( $(date +%s) - Tb ))
+
+  [ $(( $(date +%S | sed 's|^0||g')+$every )) -ge 60 ] && break
+  [ $Td -lt $every ] && sleep $(( every - Td ))
+  MIN_now=$(date +%M | sed 's|^0||g')
+done
+
+exit 0
+
