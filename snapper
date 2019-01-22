@@ -69,7 +69,7 @@ input_uri=$(getParm input_uri) || input_uri=  ##BP:  Where to grab the snapshot 
 [ -z "${input_uri}" ] && input_dev=$(getParm input_dev)  ##BP:   something
 
 # the resolution of the image...
-resolution=$(getParm resolution)  ##BP: Set a resolution for the picture
+resolution=$(getParm resolution) || resolution=1920x1080   ##BP: Set a resolution for the picture
 
 snap_label=$(getParm label) || snap_label=backyard  ##BP: Snapshot's label
 snap_ext=$(getParm ext) || snap_ext=jpg  ##BP: Snapshot's extension
@@ -107,8 +107,14 @@ remote_upload_snap()
     else
       staticSource=$OUTPUT
     fi
-    ${scp} -i ${key} "${staticSource}" ${upload_user}@${upload_server}:${upload_static}
-    (( $? )) && say "Uploading to ${upload_static} failed!!" error && return 1
+	## If you don't have an upload_server then...
+	if isParm local_static; then
+		/bin/cp -f "${staticSource}" "${upload_static}"
+		(( $? )) && say "Copying to ${upload_static} failed!!" error && return 1
+	else
+	    ${scp} -i ${key} "${staticSource}" ${upload_user}@${upload_server}:${upload_static}
+    	(( $? )) && say "Uploading to ${upload_static} failed!!" error && return 1
+	fi
     isParm staticQt && rm -rf "${staticSource}"
   fi
 return 0
@@ -153,10 +159,6 @@ while [ $MIN_start -eq $MIN_now ]; do ((c++))
   ## This is to remove time at the end depending on how long we've been here taking this picture
   Tb=$(date +%s)
 
-  ## TODO: remove later but for now I will set a resolution because it's necessary here. is it though?
-  [ -z ${resolution} ] && resolution=3840x2160
-  [ -z ${loglevel} ] && loglevel=quiet
-
   isParm store_locally && [ ! -d ${DIR}/${SUBDIR} ] && /bin/mkdir -p ${DIR}/${SUBDIR}
   if [ ! -z "${input_dev}" ]; then
     say "about to download: \"$OUTPUT\" via \"$input_dev\"" red
@@ -179,7 +181,6 @@ while [ $MIN_start -eq $MIN_now ]; do ((c++))
   elif [ ! -z "${input_uri}" ]; then
 	if [[ $input_uri =~ ^rtsp:// ]]; then
 		say "RTSP stream: $input_uri" red
-		set -x	
 	    ffmpeg \
 	      	-y \
 	      	-hide_banner \
@@ -187,7 +188,7 @@ while [ $MIN_start -eq $MIN_now ]; do ((c++))
 			-rtsp_transport tcp \
 	  		-i ${input_uri} \
 	      	-s ${resolution} \
-			-qscale:v 2 \
+			-qscale:v 8 \
 			-f image2 \
 	      	-frames 1 \
 	      	-stimeout 1000 \
@@ -197,7 +198,7 @@ while [ $MIN_start -eq $MIN_now ]; do ((c++))
 	    wget -O "$OUTPUT" "$input_uri"
 	fi
   fi
-  (( $? )) && set +x && say "ERROR: There was a problem running the command and creating $OUTPUT" error && cleanup && ((++e)) && continue
+  (( $? )) && say "ERROR: There was a problem running the command and creating $OUTPUT" error && cleanup && ((++e)) && continue
 
   ## Possible errors
   [ ! -e "${OUTPUT}" ] && say "[$e] No image created :(" error && ((++e)) && continue
